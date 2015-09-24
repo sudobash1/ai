@@ -11,26 +11,65 @@ from GameState import *
 from Ant import *
 from AIPlayerUtils import *
 
+##
+# weight
+#
+# Description: Takes a raw value and determines where it lies along the weight list.
+# It returns the value at that position in the weight list. If it lies between two
+# values, then it returns the weighed average of the two weights. If it lies beyond the
+# end of the list, it returns the last item in the list.
+#
+# Parameters:
+#    raw        - The raw score which will be weighted (float or int)
+#    weightList - The list to weigh the raw value with (list[float or int])
+#
+# Return:
+#    The weighted value (float)
+##
+def weight(raw, weightList):
+    if raw > len(weightList) - 1:
+        return float(weightList[-1])
+    elif int(raw) == raw:
+        return float(weightList[int(raw)])
+    else:
+        bottom = weightList[int(math.floor(raw))] * (raw - math.floor(raw))
+        top = weightList[int(math.ceil(raw))] * (raw - math.ceil(raw))
+        return float(bottom + top) / 2.
+
 
 # Preference for which ant to attack first if there is a choice
 ATTACK_PREFERENCE = [QUEEN, SOLDIER, R_SOLDIER, DRONE, WORKER]
 
-#Grading weight for different factors
-ANTSCOREWEIGHT = lambda x: 20 * math.atan(x/35. * math.pi)
-FOODSCOREWEIGHT = lambda x: (x/2.-1.)**3+1.
-CARRYINGWEIGHT = lambda x: x
-HILLPROTECTIONWEIGHT = lambda x: x
-WORKERLOCATIONPENALTY = lambda x: -x #Distance from goal is bad
-SOLDIERLOCATIONSCORE = lambda x: 40 * x
+# Grading weight for different factors
+# Each of these is a function which gets passed the raw score for that category and
+# weights it.
+
+# How much to weight our food count
+FOODSCOREWEIGHT = lambda x: weight(x, [0, 1000, 1800, 2500, 2900, 3200, 3400, 3500, 33500, 63500, 93500])
+
+# How much to weight the number of workers who reach their destination
+REACHDESTWEIGHT = lambda x: 9 * x
+
+# How much to weight the distance a worker is from a goal
+WORKERLOCATIONWEIGHT = lambda x: -3 * x #Distance from goal is bad
+
+# How much to weight soldiers being in the correct area
+SOLDIERLOCATIONWEIGHT = lambda x: 6 * x
+
+# How much to weight drones being in the correct area
+DRONELOCATIONWEIGHT = lambda x: -5 * x #Distance from goal is bad
+
+# How much to weight how many ants have moved this turn
+MOVEDANTSSCOREWIEGHT = lambda x: x
 
 #Grading weight for ant types count
 #Queen, worker, drone, soldier, ranged soldier
 antTypeGradingWeight = [
-    lambda x: 0, #QUEEN
-    lambda x: 20 * math.log(2) if x > 2 else 20 * math.log(x+.000001), #WORKER
-    lambda x: 10 if x else 0, #DRONE
-    lambda x: 11 * math.log(x+1), #SOLDIER
-    lambda x: 3 * math.log(x+1), #RANGE SOLDIER
+    lambda x: 0,                                       #QUEEN (never build a queen)
+    lambda x: weight(x, [-100000, 100000, 120000, 0]), #WORKER
+    lambda x: weight(x, [0, 900]),                     #DRONE
+    lambda x: weight(x, [0, 1300, 2600]),              #SOLDIER
+    lambda x: 0,                                       #RANGE SOLDIER (never build a range soldier)
     ]
 
 ##
@@ -117,7 +156,6 @@ class AIPlayer(Player):
     #Return: The Move to be made
     ##
     def getMove(self, currentState):
-
         moves = {}
 
         for move in listAllLegalMoves(currentState):
@@ -131,7 +169,11 @@ class AIPlayer(Player):
 
         # randomly select from the best moves
         bestMoves = moves[max(moves.keys())]
-        return bestMoves[random.randint(0, len(bestMoves) - 1)]
+        move = bestMoves[random.randint(0, len(bestMoves) - 1)]
+        hypotheticalState = self.hypotheticalMove(currentState, move)
+        self.getPlayerScore(hypotheticalState, self.playerId)
+
+        return move
 
     ##
     #getAttack
@@ -168,12 +210,19 @@ class AIPlayer(Player):
     #   What the agent's state would be like after a given move.
     ##
     def hypotheticalMove(self, state, move):
-        newState = state.clone()
+        newState = state.fastclone()
         if move.moveType == END:
             return newState
         elif move.moveType == MOVE_ANT:
             ant = getAntAt(newState, move.coordList[0])
             ant.coords = move.coordList[-1]
+
+            #check if ant is depositing food
+            if ant.carrying:
+                targets = getConstrList(newState, self.playerId, (ANTHILL, TUNNEL))
+                if tuple(ant.coords) in (tuple(t.coords) for t in targets):
+                    ant.carrying = False
+                    newState.inventories[self.playerId].foodCount += 1
 
             #check if ant can attack
             targets = [] #coordinates of attackable ants
@@ -194,21 +243,18 @@ class AIPlayer(Player):
 
                 if targetAnt.health <= 0:
                     #Remove the dead ant
-                    newState.board[target[0]][target[1]].ant = None
                     newState.inventories[1 - self.playerId].ants.remove(targetAnt)
 
         else: #Move type BUILD
             if move.buildType in (WORKER, DRONE, SOLDIER, R_SOLDIER):
                 #Build ant on hill
                 ant = Ant(move.coordList[0], move.buildType, self.playerId)
-                newState.board[move.coordList[0][0]][move.coordList[0][1]].ant = ant
                 newState.inventories[self.playerId].ants.append(ant)
 
                 newState.inventories[self.playerId].foodCount -= UNIT_STATS[move.buildType][COST]
             else:
                 #build new building
                 building = Building(move.coordList[0], move.buildType, self.playerId)
-                newState.board[move.coordList[0][0]][move.coordList[0][1]].constr = building
                 newState.inventories[self.playerId].constrs.append(building)
 
                 newState.inventories[self.playerId].foodCount -= CONSTR_STATS[move.buildType][BUILD_COST]
@@ -216,6 +262,7 @@ class AIPlayer(Player):
         return newState
 
 
+    ## scoreAnts - Create a score for the list of ants given
     def scoreAnts(self, ants, type):
         count = 0.
 
@@ -226,69 +273,146 @@ class AIPlayer(Player):
         return antTypeGradingWeight[type](count)
 
 
+    ##
+    # getPlayerScore
+    # Description: takes a state and player number and returns a number estimating that player's
+    # score. Note, this score may be negative and have a very large magnitude (> 100000)
+    # Parameters:
+    #    hypotheticalState - The state to score
+    #    playerNo          - The player number to determine the score for
+    # Returns:
+    #    A float representing that player's score.
+    #
     def getPlayerScore(self, hypotheticalState, playerNo):
+
+        #################################################################################
+        #Score the ants we have based on number, type and health
 
         #get the number of ants on the board, and for certain types of ants
         antScore = 0
         for type in (WORKER, DRONE, SOLDIER, R_SOLDIER):
-            antScore += self.scoreAnts(hypotheticalState.inventories[playerNo].ants, type)
+            score = self.scoreAnts(hypotheticalState.inventories[playerNo].ants, type)
+            antScore += score
 
-            if playerNo == self.playerId and type == WORKER:
-                print antScore
+
+        #################################################################################
+        #Score the food we have
 
         #get the food count from the move
         foodScore = hypotheticalState.inventories[playerNo].foodCount
+        foodScore = FOODSCOREWEIGHT(foodScore)
+
+
+        #################################################################################
+        #Score the workers for getting to their goals
+
+        ourBuildings = getConstrList(hypotheticalState, playerNo, (ANTHILL, TUNNEL))
+        ourBuildingCoords = [tuple(b.coords) for b in ourBuildings]
+
+        foods = getConstrList(hypotheticalState, None, (FOOD,))
+        foodCoords = [tuple(f.coords) for f in foods]
 
         #get the total food which will be being carried at the end of this turn
-        carrying = 0
-        for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
-            if not worker.carrying:
-                # Check if the worker is standing on a food source
-                if getConstrAt(hypotheticalState, worker.coords) == FOOD:
-                    carrying += 1
-
-
-        #workers get bonus points for being closer to a goal
-        workerLocationPenalty = 0
+        workerDestReached = 0
         for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
             if worker.carrying:
-                goals = [b.coords for b in getConstrList(hypotheticalState, self.playerId, (ANTHILL, TUNNEL))]
+                goals = ourBuildingCoords
             else:
-                goals = [f.coords for f in getConstrList(hypotheticalState, None, (FOOD,))]
+                goals = foodCoords
+
+            if tuple(worker.coords) in goals:
+                workerDestReached += 1
+
+        workerDestScore = REACHDESTWEIGHT(workerDestReached)
+
+
+        #################################################################################
+        #Score the progress of workers towards their destinations
+
+        #workers get bonus points for being closer to a goal (the distance will be weighted negatively)
+        workerLocationScore = 0
+        for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
+            if worker.carrying:
+                goals = ourBuildingCoords
+            else:
+                goals = foodCoords
 
             wc = worker.coords
             dist = min(abs(wc[0]-gc[0]) + abs(wc[1]-gc[1]) for gc in goals)
 
-            workerLocationPenalty += dist
+            workerLocationScore += dist
 
-        if workerLocationPenalty:
-            workerLocationPenalty /= len(getAntList(hypotheticalState, playerNo, (WORKER,)))
+        # average this score
+        if workerLocationScore:
+            workerLocationScore /= len(getAntList(hypotheticalState, playerNo, (WORKER,)))
 
-        #war ants get bonus points for being on the other side of the field
+        workerLocationScore = WORKERLOCATIONWEIGHT(workerLocationScore)
+
+
+        #################################################################################
+        #Score the location of soldier ants
+
+        #soldier ants get bonus points for being on the other side of the field
         soldierLocationScore = 0
-        for soldier in getAntList(hypotheticalState, playerNo, (SOLDIER, R_SOLDIER, DRONE)):
-            if soldier.coords[1] > 3:
+        for soldier in getAntList(hypotheticalState, playerNo, (SOLDIER, )):
+            if soldier.coords[1] > 6:
                 soldierLocationScore += 1
+            else:
+                soldierLocationScore = soldier.coords[1] - 6
 
+        # average this score
         if soldierLocationScore:
-            soldierLocationScore /= len(getAntList(hypotheticalState, playerNo, (SOLDIER, R_SOLDIER, DRONE)))
+            soldierLocationScore /= len(getAntList(hypotheticalState, playerNo, (SOLDIER,)))
 
-        #get anthill protection
-        #how do you grade this?
-        hillProtectionScore = 0
-
-        if self.playerId == playerNo:
-            asciiPrintState(hypotheticalState)
-            print ANTSCOREWEIGHT(antScore)
-
-        return (ANTSCOREWEIGHT(antScore) +
-                FOODSCOREWEIGHT(foodScore) +
-                CARRYINGWEIGHT(carrying) +
-                WORKERLOCATIONPENALTY(workerLocationPenalty) +
-                SOLDIERLOCATIONSCORE(soldierLocationScore) +
-                HILLPROTECTIONWEIGHT(hillProtectionScore))
+        soldierLocationScore = SOLDIERLOCATIONWEIGHT(soldierLocationScore)
 
 
+        #################################################################################
+        #Score the location of drone ants
+
+        #drone ants are always to go towards the enemy hill
+        droneLocationScore = 0
+        enemyHill = getConstrList(hypotheticalState, 1 - playerNo, (ANTHILL,))[0]
+        for drone in getAntList(hypotheticalState, playerNo, (DRONE,)):
+            dist = (abs(drone.coords[0]-enemyHill.coords[0]) +
+                    abs(drone.coords[1]-enemyHill.coords[1]))
+            droneLocationScore += dist
+
+        # average this score
+        if droneLocationScore:
+            droneLocationScore /= len(getAntList(hypotheticalState, playerNo, (DRONE,)))
+
+        droneLocationScore = DRONELOCATIONWEIGHT(droneLocationScore)
+
+
+        #################################################################################
+        #Score every ant having moved
+
+        #It is to our advantage to have every ant move every turn
+        movedAnts = 0
+        for ant in hypotheticalState.inventories[playerNo].ants:
+            if ant.hasMoved:
+                movedAnts += 1
+
+        movedAntsScore = MOVEDANTSSCOREWIEGHT(movedAnts)
+
+        return (antScore +
+                foodScore +
+                workerDestScore +
+                workerLocationScore +
+                soldierLocationScore +
+                droneLocationScore +
+                movedAntsScore)
+
+    ##
+    # hasWon
+    # Description: Takes a GameState and a player number and returns if that player has won
+    # Parameters:
+    #    hypotheticalState - The state to test for victory
+    #    playerNo          - What player to test victory for
+    # Returns:
+    #    True if the player has won else False.
+    ##
     def hasWon(self, hypotheticalState, playerNo):
 
         #Check if enemy anthill has been captured
@@ -339,22 +463,51 @@ class AIPlayer(Player):
         #Normalize the score to be between 0.0 and 1.0
         return (math.atan(playerScore - enemyScore) + math.pi/2) / math.pi
 
+##
+# unitTest1
+# Description: Tests the AIPlayer.hypotheticalMove method
+# Returns:
+#    False if anything is wrong else True
+##
+def unitTest1():
+    board = [[Location((col, row)) for row in xrange(0,BOARD_LENGTH)] for col in xrange(0,BOARD_LENGTH)]
+    p1Inventory = Inventory(PLAYER_ONE, [], [], 10)
+    p2Inventory = Inventory(PLAYER_TWO, [], [], 0)
+    neutralInventory = Inventory(NEUTRAL, [], [], 0)
 
-"""
-        AITurn = hypotheticalState.whoseTurn #reference value for this AI agent
+    state = GameState(board, [p1Inventory, p2Inventory, neutralInventory], MENU_PHASE, PLAYER_ONE)
 
-        #store the enemy score (for reference to see if this agent is winning)
-        enemyScore = 0
-        enemyTurn = None
-        if AITurn == 0:
-            enemyTurn = 1
-        else:
-            enemyTurn = 0
-        eNumberAnts = len(getAntList(hypotheticalState, enemyTurn,(QUEEN, WORKER, DRONE, SOLDIER, R_SOLDIER)))
-        eNumWorkers = len(getAntList(hypotheticalState, enemyTurn,(None, WORKER, None, None, None)))
-        eNumDrones = len(getAntList(hypotheticalState, enemyTurn,(None, None, DRONE, None, None)))
-        eNumSoldiers = len(getAntList(hypotheticalState, enemyTurn,(None, None, None, SOLDIER, R_SOLDIER)))
-        efoodScore = hypotheticalState.inventories[enemyTurn].foodCount
-        #store the enemy score
-        enemyScore = .2*(eNumberAnts) + .1*(eNumWorkers) + .05*(eNumDrones) + .1*(eNumSoldiers) + .3*(eFoodScore)
-        """
+    #Add an ant to move
+    ant = Ant((0,0), WORKER, 0)
+    board[0][0].ant = ant
+    p1Inventory.ants.append(ant)
+
+    player = AIPlayer(0)
+    newState = player.hypotheticalMove(state, Move(MOVE_ANT, ((0,0), (0,1), (0,2)), None))
+    if tuple(newState.inventories[0].ants[0].coords) != (0, 2):
+        print "didn't move ant"
+        return False
+
+    #test adding a building
+    newState = player.hypotheticalMove(state, Move(BUILD, ((3,3),), TUNNEL))
+
+    if len(newState.inventories[0].constrs) == 0:
+        print "didn't create construction"
+        return False
+
+    if newState.inventories[0].constrs[0].type != TUNNEL:
+        print "created wrong type of construction"
+        return False
+
+    if tuple(newState.inventories[0].constrs[0].coords) != (3, 3):
+        print "created construction at wrong place"
+        return False
+
+    if newState.inventories[0].foodCount != 7:
+        print "didn't subtract food cost"
+        return False
+
+    return True
+
+if unitTest1():
+    print "Unit Test 1 passed!"
