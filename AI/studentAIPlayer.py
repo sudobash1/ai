@@ -11,66 +11,24 @@ from GameState import *
 from Ant import *
 from AIPlayerUtils import *
 
-##
-# weight
-#
-# Description: Takes a raw value and determines where it lies along the weight list.
-# It returns the value at that position in the weight list. If it lies between two
-# values, then it returns the weighed average of the two weights. If it lies beyond the
-# end of the list, it returns the last item in the list.
-#
-# Parameters:
-#    raw        - The raw score which will be weighted (float or int)
-#    weightList - The list to weigh the raw value with (list[float or int])
-#
-# Return:
-#    The weighted value (float)
-##
-def weight(raw, weightList):
-    if raw > len(weightList) - 1:
-        return float(weightList[-1])
-    elif int(raw) == raw:
-        return float(weightList[int(raw)])
-    else:
-        bottom = weightList[int(math.floor(raw))] * (raw - math.floor(raw))
-        top = weightList[int(math.ceil(raw))] * (raw - math.ceil(raw))
-        return float(bottom + top) / 2.
+# Depth limit for ai search
+DEPTH_LIMIT = 1
 
+# weight for food
+FOOD_WEIGHT = 300
+
+# weight for worker ant's dist to their goals
+DIST_WEIGHT = 10
+
+# weight for queen being off of the anthill
+QUEEN_LOCATION_WEIGHT = 200
+
+# weight for every ant having moved
+MOVED_WEIGHT = 1
 
 # Preference for which ant to attack first if there is a choice
 ATTACK_PREFERENCE = [QUEEN, SOLDIER, R_SOLDIER, DRONE, WORKER]
 
-# Grading weight for different factors
-# Each of these is a function which gets passed the raw score for that category and
-# weights it.
-
-# How much to weight our food count
-FOODSCOREWEIGHT = lambda x: weight(x, [0, 1000, 1800, 2500, 2900, 3200, 3400, 3500, 33500, 63500, 93500])
-
-# How much to weight the number of workers who reach their destination
-REACHDESTWEIGHT = lambda x: 9 * x
-
-# How much to weight the distance a worker is from a goal
-WORKERLOCATIONWEIGHT = lambda x: -3 * x #Distance from goal is bad
-
-# How much to weight soldiers being in the correct area
-SOLDIERLOCATIONWEIGHT = lambda x: 6 * x
-
-# How much to weight drones being in the correct area
-DRONELOCATIONWEIGHT = lambda x: -5 * x #Distance from goal is bad
-
-# How much to weight how many ants have moved this turn
-MOVEDANTSSCOREWIEGHT = lambda x: x
-
-#Grading weight for ant types count
-#Queen, worker, drone, soldier, ranged soldier
-antTypeGradingWeight = [
-    lambda x: 0,                                       #QUEEN (never build a queen)
-    lambda x: weight(x, [-100000, 100000, 120000, 0]), #WORKER
-    lambda x: weight(x, [0, 900]),                     #DRONE
-    lambda x: weight(x, [0, 1300, 2600]),              #SOLDIER
-    lambda x: 0,                                       #RANGE SOLDIER (never build a range soldier)
-    ]
 
 ##
 #AIPlayer
@@ -78,10 +36,11 @@ antTypeGradingWeight = [
 #deciding a valid move based on a given game state. This class has methods that
 #will be implemented by students in Dr. Nuxoll's AI course.
 #
-#Variables:
+#Variables:print
 #   playerId - The id of the player.
 ##
 class AIPlayer(Player):
+
 
     #__init__
     #Description: Creates a new Player
@@ -90,7 +49,11 @@ class AIPlayer(Player):
     #   inputPlayerId - The id to give the new player (int)
     ##
     def __init__(self, inputPlayerId):
-        super(AIPlayer,self).__init__(inputPlayerId, "INSERT COOL NAME HERE AI")
+        super(AIPlayer,self).__init__(inputPlayerId, "WE NEED A COOL NAME")
+
+        self.buildingCoords = [(),()]
+        self.hillCoords = None
+        self.foodCoords = [()]
 
     ##
     #getPlacement
@@ -146,6 +109,55 @@ class AIPlayer(Player):
         else:
             return [(0, 0)]
 
+
+    def scoreChildrenHelper(self, nodeList):
+        #return sum(n['score'] for n in nodeList) / len(nodeList)
+        return max(n['score'] for n in nodeList)
+
+
+    def resetState(self, state):
+        state.whoseTurn = self.playerId
+        for inventory in state.inventories:
+            for ant in inventory.ants:
+                ant.hasMoved = False
+
+    def expand(self, state, playerID, minScore=0.0, depth=0):
+
+        curScore = self.evaluateState(state)
+
+        childrenList = []
+
+        bestMove = Move(END, None, None)
+        bestScore = -1
+
+
+        # expand this node to find all child nodes
+        for childMove in listAllLegalMoves(state):
+            childState = self.hypotheticalMove(state, childMove)
+
+            self.resetState(childState)
+
+            if depth == DEPTH_LIMIT: #or curScore < minScore:
+                # Base case for depth limit or abandoning branch
+                score = self.evaluateState(childState)
+
+            elif self.hasWon(childState, playerID):
+                # Base case for victory
+                score = 1.0
+
+            else:
+                score = self.expand(childState, playerID, curScore, depth + 1)['score']
+
+            childrenList.append({'move': childMove, 'score': score})
+
+            if score > bestScore:
+                bestMove = childMove
+                bestScore = score
+
+        # return this node
+        return {'move': bestMove, 'score': self.scoreChildrenHelper(childrenList)}
+
+
     ##
     #getMove
     #Description: Gets the next move from the Player.
@@ -156,24 +168,32 @@ class AIPlayer(Player):
     #Return: The Move to be made
     ##
     def getMove(self, currentState):
-        moves = {}
+        # Cache the list of building locations for each player
+        buildings = [
+            getConstrList(currentState, 0, (ANTHILL, TUNNEL)),
+            getConstrList(currentState, 1, (ANTHILL, TUNNEL))
+        ]
 
-        for move in listAllLegalMoves(currentState):
-            hypotheticalState = self.hypotheticalMove(currentState, move)
-            rating = self.evaluateMove(hypotheticalState)
+        self.buildingCoords = [
+            [tuple(b.coords) for b in buildings[0]],
+            [tuple(b.coords) for b in buildings[1]]
+        ]
 
-            if not rating in moves:
-                moves[rating] = [move]
-            else:
-                moves[rating].append(move)
+        # Cache the hill coords for each player
+        self.hillCoords = [
+            tuple(getConstrList(currentState, 0, (ANTHILL,))[0].coords),
+            tuple(getConstrList(currentState, 1, (ANTHILL,))[0].coords)
+        ]
 
-        # randomly select from the best moves
-        bestMoves = moves[max(moves.keys())]
-        move = bestMoves[random.randint(0, len(bestMoves) - 1)]
-        hypotheticalState = self.hypotheticalMove(currentState, move)
-        self.getPlayerScore(hypotheticalState, self.playerId)
+        self.buildingCoords[0] = [tuple(b.coords) for b in buildings[0]]
+        self.buildingCoords[1] = [tuple(b.coords) for b in buildings[1]]
 
-        return move
+        # Cache the locations of foods
+        foods = getConstrList(currentState, None, (FOOD,))
+        self.foodCoords = [tuple(f.coords) for f in foods]
+
+        return self.expand(currentState, self.playerId)['move']
+
 
     ##
     #getAttack
@@ -262,21 +282,12 @@ class AIPlayer(Player):
         return newState
 
 
-    ## scoreAnts - Create a score for the list of ants given
-    def scoreAnts(self, ants, type):
-        count = 0.
-
-        for ant in ants:
-            if ant.type == type:
-                count += float(ant.health) / float(UNIT_STATS[ant.type][HEALTH])
-
-        return antTypeGradingWeight[type](count)
-
 
     ##
     # getPlayerScore
-    # Description: takes a state and player number and returns a number estimating that player's
-    # score. Note, this score may be negative and have a very large magnitude (> 100000)
+    # Description: takes a state and player number and returns a number estimating that
+    # player's score.
+    #
     # Parameters:
     #    hypotheticalState - The state to score
     #    playerNo          - The player number to determine the score for
@@ -286,123 +297,46 @@ class AIPlayer(Player):
     def getPlayerScore(self, hypotheticalState, playerNo):
 
         #################################################################################
-        #Score the ants we have based on number, type and health
-
-        #get the number of ants on the board, and for certain types of ants
-        antScore = 0
-        for type in (WORKER, DRONE, SOLDIER, R_SOLDIER):
-            score = self.scoreAnts(hypotheticalState.inventories[playerNo].ants, type)
-            antScore += score
-
-
-        #################################################################################
         #Score the food we have
 
-        #get the food count from the move
-        foodScore = hypotheticalState.inventories[playerNo].foodCount
-        foodScore = FOODSCOREWEIGHT(foodScore)
+        score = hypotheticalState.inventories[playerNo].foodCount * FOOD_WEIGHT
 
 
         #################################################################################
         #Score the workers for getting to their goals
 
-        ourBuildings = getConstrList(hypotheticalState, playerNo, (ANTHILL, TUNNEL))
-        ourBuildingCoords = [tuple(b.coords) for b in ourBuildings]
-
-        foods = getConstrList(hypotheticalState, None, (FOOD,))
-        foodCoords = [tuple(f.coords) for f in foods]
-
-        #get the total food which will be being carried at the end of this turn
-        workerDestReached = 0
         for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
             if worker.carrying:
-                goals = ourBuildingCoords
+                goals = self.buildingCoords[playerNo]
             else:
-                goals = foodCoords
-
-            if tuple(worker.coords) in goals:
-                workerDestReached += 1
-
-        workerDestScore = REACHDESTWEIGHT(workerDestReached)
-
-
-        #################################################################################
-        #Score the progress of workers towards their destinations
-
-        #workers get bonus points for being closer to a goal (the distance will be weighted negatively)
-        workerLocationScore = 0
-        for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
-            if worker.carrying:
-                goals = ourBuildingCoords
-            else:
-                goals = foodCoords
+                goals = self.foodCoords
 
             wc = worker.coords
             dist = min(abs(wc[0]-gc[0]) + abs(wc[1]-gc[1]) for gc in goals)
 
-            workerLocationScore += dist
-
-        # average this score
-        if workerLocationScore:
-            workerLocationScore /= len(getAntList(hypotheticalState, playerNo, (WORKER,)))
-
-        workerLocationScore = WORKERLOCATIONWEIGHT(workerLocationScore)
+            score -= DIST_WEIGHT * dist
 
 
         #################################################################################
-        #Score the location of soldier ants
-
-        #soldier ants get bonus points for being on the other side of the field
-        soldierLocationScore = 0
-        for soldier in getAntList(hypotheticalState, playerNo, (SOLDIER, )):
-            if soldier.coords[1] > 6:
-                soldierLocationScore += 1
-            else:
-                soldierLocationScore = soldier.coords[1] - 6
-
-        # average this score
-        if soldierLocationScore:
-            soldierLocationScore /= len(getAntList(hypotheticalState, playerNo, (SOLDIER,)))
-
-        soldierLocationScore = SOLDIERLOCATIONWEIGHT(soldierLocationScore)
-
-
-        #################################################################################
-        #Score the location of drone ants
-
-        #drone ants are always to go towards the enemy hill
-        droneLocationScore = 0
-        enemyHill = getConstrList(hypotheticalState, 1 - playerNo, (ANTHILL,))[0]
-        for drone in getAntList(hypotheticalState, playerNo, (DRONE,)):
-            dist = (abs(drone.coords[0]-enemyHill.coords[0]) +
-                    abs(drone.coords[1]-enemyHill.coords[1]))
-            droneLocationScore += dist
-
-        # average this score
-        if droneLocationScore:
-            droneLocationScore /= len(getAntList(hypotheticalState, playerNo, (DRONE,)))
-
-        droneLocationScore = DRONELOCATIONWEIGHT(droneLocationScore)
+        #Score queen being off of anthill
+        for ant in hypotheticalState.inventories[playerNo].ants:
+            if ant.type == QUEEN:
+                if tuple(ant.coords) != self.hillCoords[playerNo]:
+                    score += QUEEN_LOCATION_WEIGHT
+                else:
+                    score -= QUEEN_LOCATION_WEIGHT
+                break
 
 
         #################################################################################
         #Score every ant having moved
 
         #It is to our advantage to have every ant move every turn
-        movedAnts = 0
         for ant in hypotheticalState.inventories[playerNo].ants:
             if ant.hasMoved:
-                movedAnts += 1
+                score += MOVED_WEIGHT
 
-        movedAntsScore = MOVEDANTSSCOREWIEGHT(movedAnts)
-
-        return (antScore +
-                foodScore +
-                workerDestScore +
-                workerLocationScore +
-                soldierLocationScore +
-                droneLocationScore +
-                movedAntsScore)
+        return score
 
     ##
     # hasWon
@@ -437,7 +371,7 @@ class AIPlayer(Player):
 
 
     ##
-    #evaluateMove
+    #evaluateState
     #
     #Description: Examines a GameState and ranks how "good" that state is for the agent whose turn it is.
     #              A rating is given on the players state. 1.0 is if the agent has won, 0.0 if the enemy has won,
@@ -449,7 +383,7 @@ class AIPlayer(Player):
     #Return:
     #   The move rated as the "best"
     ##
-    def evaluateMove(self, hypotheticalState):
+    def evaluateState(self, hypotheticalState):
 
         #Check if the game is over
         if self.hasWon(hypotheticalState, self.playerId):
@@ -458,10 +392,10 @@ class AIPlayer(Player):
             return 0.0
 
         playerScore = self.getPlayerScore(hypotheticalState, self.playerId)
-        enemyScore = self.getPlayerScore(hypotheticalState, 1 - self.playerId)
 
         #Normalize the score to be between 0.0 and 1.0
-        return (math.atan(playerScore - enemyScore) + math.pi/2) / math.pi
+        print (math.atan(playerScore/10000.) + math.pi/2) / math.pi
+        return (math.atan(playerScore/10000.) + math.pi/2) / math.pi
 
 ##
 # unitTest1
