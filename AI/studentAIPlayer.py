@@ -1,5 +1,6 @@
 
 import random
+import copy
 import math
 
 from Player import *
@@ -12,22 +13,25 @@ from Ant import *
 from AIPlayerUtils import *
 
 # Depth limit for ai search
-DEPTH_LIMIT = 1
+DEPTH_LIMIT = 2
+
+# weight for having at least one worker
+WORKER_WEIGHT = 100000
 
 # weight for food
-FOOD_WEIGHT = 300
+FOOD_WEIGHT = 500
+
+# weight for worker ants carrying food
+CARRY_WEIGHT = 100
 
 # weight for worker ant's dist to their goals
-DIST_WEIGHT = 10
+DIST_WEIGHT = 5
 
-# weight for queen being off of the anthill
-QUEEN_LOCATION_WEIGHT = 200
+# weight for queen being off of places the worker must go
+QUEEN_LOCATION_WEIGHT = 20000
 
 # weight for every ant having moved
 MOVED_WEIGHT = 1
-
-# Preference for which ant to attack first if there is a choice
-ATTACK_PREFERENCE = [QUEEN, SOLDIER, R_SOLDIER, DRONE, WORKER]
 
 
 ##
@@ -36,7 +40,7 @@ ATTACK_PREFERENCE = [QUEEN, SOLDIER, R_SOLDIER, DRONE, WORKER]
 #deciding a valid move based on a given game state. This class has methods that
 #will be implemented by students in Dr. Nuxoll's AI course.
 #
-#Variables:print
+#Variables:
 #   playerId - The id of the player.
 ##
 class AIPlayer(Player):
@@ -110,48 +114,63 @@ class AIPlayer(Player):
             return [(0, 0)]
 
 
+    # scoreChildrenHelper - Helper to determine overall score of branch.
+    # Returns max scoring child.
     def scoreChildrenHelper(self, nodeList):
-        #return sum(n['score'] for n in nodeList) / len(nodeList)
         return max(n['score'] for n in nodeList)
 
 
-    def resetState(self, state):
-        state.whoseTurn = self.playerId
-        for inventory in state.inventories:
-            for ant in inventory.ants:
-                ant.hasMoved = False
+    ##
+    #expand
+    #
+    #Description: Called to expand a state. Recursively examines the game tree down to
+    # DEPTH_LIMIT. Passes back up a dict with a move and associated score. The move is the
+    # best move to take in this situation.
+    #
+    #Parameters:
+    #   state - The state at this place in the game tree
+    #           (to start it should be the current state)
+    #   playerID - Ignored for now. Should always be the current player
+    #   depth - The depth the tree has been examined to. (for recursive use only)
+    #
+    #Return: A dict with keys 'move' and 'score'
+    # move is the ideal Move()
+    # score is the associated score. 0.0 is a loss. 1.0 or more is a victory.
+    ##
+    def expand(self, state, playerID, depth=0):
 
-    def expand(self, state, playerID, minScore=0.0, depth=0):
+        if depth == DEPTH_LIMIT:
+            # Base case for depth limit
+            return {'move': Move(END, None, None), 'score': self.evaluateState(state)}
 
-        curScore = self.evaluateState(state)
+        elif self.hasWon(state, playerID):
+            # Base case for victory
+            # Make the final score take into account how many moves it will take to reach this
+            # victory state. Winning this turn is better than winning next turn.
+            return {'move': Move(END, None, None), 'score': float(DEPTH_LIMIT + 1 - depth)}
 
         childrenList = []
 
-        bestMove = Move(END, None, None)
+        bestMove = None
         bestScore = -1
 
-
         # expand this node to find all child nodes
-        for childMove in listAllLegalMoves(state):
-            childState = self.hypotheticalMove(state, childMove)
+        for move in listAllLegalMoves(state):
 
-            self.resetState(childState)
+            childState = self.hypotheticalMove(state, move)
+            childState.whoseTurn = self.playerId
 
-            if depth == DEPTH_LIMIT: #or curScore < minScore:
-                # Base case for depth limit or abandoning branch
-                score = self.evaluateState(childState)
+            for inventory in childState.inventories:
+                for ant in inventory.ants:
+                    ant.hasMoved = False
 
-            elif self.hasWon(childState, playerID):
-                # Base case for victory
-                score = 1.0
+            # Recursive step
+            score = self.expand(childState, playerID, depth + 1)['score']
 
-            else:
-                score = self.expand(childState, playerID, curScore, depth + 1)['score']
-
-            childrenList.append({'move': childMove, 'score': score})
+            childrenList.append({'move': move, 'score': score})
 
             if score > bestScore:
-                bestMove = childMove
+                bestMove = move
                 bestScore = score
 
         # return this node
@@ -168,6 +187,7 @@ class AIPlayer(Player):
     #Return: The Move to be made
     ##
     def getMove(self, currentState):
+
         # Cache the list of building locations for each player
         buildings = [
             getConstrList(currentState, 0, (ANTHILL, TUNNEL)),
@@ -205,15 +225,8 @@ class AIPlayer(Player):
     #   enemyLocation - The Locations of the Enemies that can be attacked (Location[])
     ##
     def getAttack(self, currentState, attackingAnt, enemyLocations):
-        target = None
-        for coords in enemyLocations:
-            ant = getAntAt(currentState, coords)
-            if (not target or
-                ATTACK_PREFERENCE.index(ant.type) < ATTACK_PREFERENCE.index(target.type)
-                ):
-                target = ant
-
-        return target.coords
+        #Attack a random enemy.
+        return enemyLocations[random.randint(0, len(enemyLocations) - 1)]
 
 
     ##
@@ -231,18 +244,26 @@ class AIPlayer(Player):
     ##
     def hypotheticalMove(self, state, move):
         newState = state.fastclone()
+
         if move.moveType == END:
+            newState.whoseTurn = 1 - state.whoseTurn
             return newState
+
         elif move.moveType == MOVE_ANT:
             ant = getAntAt(newState, move.coordList[0])
             ant.coords = move.coordList[-1]
 
             #check if ant is depositing food
             if ant.carrying:
-                targets = getConstrList(newState, self.playerId, (ANTHILL, TUNNEL))
-                if tuple(ant.coords) in (tuple(t.coords) for t in targets):
+                if tuple(ant.coords) in self.buildingCoords[self.playerId]:
                     ant.carrying = False
                     newState.inventories[self.playerId].foodCount += 1
+
+            #check if ant is picking up food
+            if not ant.carrying:
+                if tuple(ant.coords) in self.foodCoords:
+                    ant.carrying = True
+
 
             #check if ant can attack
             targets = [] #coordinates of attackable ants
@@ -264,6 +285,8 @@ class AIPlayer(Player):
                 if targetAnt.health <= 0:
                     #Remove the dead ant
                     newState.inventories[1 - self.playerId].ants.remove(targetAnt)
+
+            ant.hasMoved = True
 
         else: #Move type BUILD
             if move.buildType in (WORKER, DRONE, SOLDIER, R_SOLDIER):
@@ -291,22 +314,53 @@ class AIPlayer(Player):
     # Parameters:
     #    hypotheticalState - The state to score
     #    playerNo          - The player number to determine the score for
+    #    debug             - If this is true then the score will be returned as a dict
     # Returns:
-    #    A float representing that player's score.
-    #
-    def getPlayerScore(self, hypotheticalState, playerNo):
+    #    If not debugging:
+    #      A float representing that player's score
+    #    If debugging
+    #      A dict containing the components of the player's score along with the score
+    ##
+    def getPlayerScore(self, hypotheticalState, playerNo, debug=False):
+
+        workers = getAntList(hypotheticalState, playerNo, (WORKER,))
+
+        #################################################################################
+        #Score having exactly one worker
+
+        workerCountScore = 0
+        if len(workers) == 1:
+            workerCountScore = WORKER_WEIGHT
 
         #################################################################################
         #Score the food we have
 
-        score = hypotheticalState.inventories[playerNo].foodCount * FOOD_WEIGHT
+        foodScore = hypotheticalState.inventories[playerNo].foodCount * FOOD_WEIGHT
 
 
         #################################################################################
-        #Score the workers for getting to their goals
+        #Score queen being off of anthill and food
 
-        for worker in getAntList(hypotheticalState, playerNo, (WORKER,)):
+        queenScore = 0
+
+        for ant in hypotheticalState.inventories[playerNo].ants:
+            if ant.type == QUEEN:
+                if tuple(ant.coords) in list(self.buildingCoords[playerNo]) + self.foodCoords:
+                    queenScore = -QUEEN_LOCATION_WEIGHT
+                else:
+                    queenScore = QUEEN_LOCATION_WEIGHT
+                break
+
+
+        #################################################################################
+        #Score the workers for getting to their goals and carrying food
+
+        distScore = 0
+        carryScore = 0
+
+        for worker in workers:
             if worker.carrying:
+                carryScore += CARRY_WEIGHT
                 goals = self.buildingCoords[playerNo]
             else:
                 goals = self.foodCoords
@@ -314,29 +368,25 @@ class AIPlayer(Player):
             wc = worker.coords
             dist = min(abs(wc[0]-gc[0]) + abs(wc[1]-gc[1]) for gc in goals)
 
-            score -= DIST_WEIGHT * dist
-
-
-        #################################################################################
-        #Score queen being off of anthill
-        for ant in hypotheticalState.inventories[playerNo].ants:
-            if ant.type == QUEEN:
-                if tuple(ant.coords) != self.hillCoords[playerNo]:
-                    score += QUEEN_LOCATION_WEIGHT
-                else:
-                    score -= QUEEN_LOCATION_WEIGHT
-                break
-
+            distScore -= DIST_WEIGHT * dist
 
         #################################################################################
         #Score every ant having moved
 
+        movedScore = 0
+
         #It is to our advantage to have every ant move every turn
         for ant in hypotheticalState.inventories[playerNo].ants:
             if ant.hasMoved:
-                score += MOVED_WEIGHT
+                movedScore += MOVED_WEIGHT
 
-        return score
+        score = foodScore + distScore + carryScore + queenScore + movedScore + workerCountScore
+
+        if debug:
+            return {'f': foodScore, 'd': distScore, 'c': carryScore, 'q': queenScore,
+                    'm': movedScore, 'w': workerCountScore, 'S': score}
+        else:
+            return score
 
     ##
     # hasWon
@@ -374,8 +424,7 @@ class AIPlayer(Player):
     #evaluateState
     #
     #Description: Examines a GameState and ranks how "good" that state is for the agent whose turn it is.
-    #              A rating is given on the players state. 1.0 is if the agent has won, 0.0 if the enemy has won,
-    #              any value > 0.5 means the agent is winning.
+    #              A rating is given on the players state. 1.0 is if the agent has won; 0.0 if the enemy has won.
     #
     #Parameters:
     #   hypotheticalState - The state being considered by the AI for ranking.
@@ -394,8 +443,18 @@ class AIPlayer(Player):
         playerScore = self.getPlayerScore(hypotheticalState, self.playerId)
 
         #Normalize the score to be between 0.0 and 1.0
-        print (math.atan(playerScore/10000.) + math.pi/2) / math.pi
         return (math.atan(playerScore/10000.) + math.pi/2) / math.pi
+
+
+    ##
+    #registerWin
+    #Description: Tells the player if they won or not
+    #
+    #Parameters:
+    #   hasWon - True if the player won the game. False if they lost (Boolean)
+    #
+    def registerWin(self, hasWon):
+        pass
 
 ##
 # unitTest1
